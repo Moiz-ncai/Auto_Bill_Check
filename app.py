@@ -1,23 +1,47 @@
-import os
 import sys
 import cv2
 import re
 import fitz  # PyMuPDF
 import numpy as np
-from PIL import Image
 from ultralytics import YOLO
 from paddleocr import PaddleOCR
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout,
     QLabel, QFileDialog, QWidget, QScrollArea, QProgressBar,
-    QSplitter, QFrame, QGraphicsDropShadowEffect
+    QSplitter, QFrame, QGraphicsDropShadowEffect, QLineEdit
 )
 from PyQt5.QtGui import (
     QPixmap, QImage, QIcon, QPalette, QColor,
     QLinearGradient, QPainter, QFont
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize
+
+
+class StyledLineEdit(QLineEdit):
+    def __init__(self, placeholder_text=""):
+        super().__init__()
+
+        # Set a modern, clean font
+        font = QFont("Segoe UI", 10)
+        self.setFont(font)
+
+        # Style the line edit
+        self.setStyleSheet("""
+            QLineEdit {
+                background-color: #34495e;
+                color: white;
+                border: 1px solid #2c3e50;
+                padding: 5px;
+                border-radius: 4px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #3498db;
+            }
+        """)
+
+        # Set placeholder text
+        self.setPlaceholderText(placeholder_text)
 
 
 class StyledButton(QPushButton):
@@ -64,6 +88,10 @@ class SideBar(QFrame):
                 color: white;
                 padding: 10px;
             }
+            QLabel {
+                color: #ecf0f1;
+                margin-bottom: 5px;
+            }
         """)
 
         # Layout
@@ -102,19 +130,50 @@ class SideBar(QFrame):
         """)
         layout.addWidget(self.page_label)
 
+        # Results Section
+        results_header = QLabel("Processing Results")
+        results_header.setStyleSheet("""
+            color: #ecf0f1;
+            font-weight: bold;
+            margin-top: 20px;
+        """)
+        layout.addWidget(results_header)
+
+        # Reference Number Section
+        ref_num_layout = QHBoxLayout()
+        ref_num_label = QLabel("Reference Number:")
+        self.ref_num_edit = StyledLineEdit("Reference Number")
+        ref_num_layout.addWidget(ref_num_label)
+        ref_num_layout.addWidget(self.ref_num_edit)
+        ref_num_widget = QWidget()
+        ref_num_widget.setLayout(ref_num_layout)
+        layout.addWidget(ref_num_widget)
+
+        # Total Bill Section
+        bill_layout = QHBoxLayout()
+        bill_label = QLabel("Total Bill (PKR):")
+        self.bill_edit = StyledLineEdit("Total Bill")
+        bill_layout.addWidget(bill_label)
+        bill_layout.addWidget(self.bill_edit)
+        bill_widget = QWidget()
+        bill_widget.setLayout(bill_layout)
+        layout.addWidget(bill_widget)
+
         # Add stretch to push items to top
         layout.addStretch(1)
+
 
 
 class ProcessPagesThread(QThread):
     update_progress = pyqtSignal(int)
     processing_complete = pyqtSignal()
 
-    def __init__(self, pdf_document, model, ocr):
+    def __init__(self, pdf_document, model, ocr, result_signal):
         super().__init__()
         self.pdf_document = pdf_document
         self.model = model
         self.ocr = ocr
+        self.result_signal = result_signal  # Store the signal passed from main app
         self.processed_pages = {}
 
     def run(self):
@@ -123,6 +182,10 @@ class ProcessPagesThread(QThread):
             # Render page
             page = self.pdf_document[page_num]
             img_cv = self.render_page(page)
+
+            # Default values in case no detection occurs
+            bill_text = "N/A"
+            ref_num_text = "N/A"
 
             # Run inference
             results = self.model(img_cv, conf=0.2)
@@ -134,6 +197,9 @@ class ProcessPagesThread(QThread):
 
                 # Draw bounding boxes with OCR text and summary
                 output_image, bill_text, ref_num_text = self.draw_bboxes_with_ocr(img_cv, boxes)
+
+                # Emit results for this page using the passed signal
+                self.result_signal.emit(page_num, ref_num_text, bill_text)
 
             # Convert processed image back to QPixmap
             output_image_rgb = cv2.cvtColor(output_image, cv2.COLOR_BGR2RGB)
@@ -151,6 +217,7 @@ class ProcessPagesThread(QThread):
 
         # Signal processing is complete
         self.processing_complete.emit()
+
 
     def render_page(self, page):
         # Render page to an image with better quality
@@ -255,10 +322,14 @@ class ProcessPagesThread(QThread):
 
 
 class PDFOCRApp(QMainWindow):
+    page_result_signal = pyqtSignal(int, str, str)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Professional PDF OCR Detection")
         self.setGeometry(100, 100, 1200, 800)
+        self.page_results = {}
+        self.page_result_signal.connect(self.update_page_results)
 
         # Main widget
         main_widget = QWidget()
@@ -347,7 +418,12 @@ class PDFOCRApp(QMainWindow):
         self.disable_buttons_during_processing()
 
         # Create processing thread
-        self.processing_thread = ProcessPagesThread(self.pdf_document, self.model, self.ocr)
+        self.processing_thread = ProcessPagesThread(
+            self.pdf_document,
+            self.model,
+            self.ocr,
+            self.page_result_signal  # Pass the signal to the thread
+        )
         self.processing_thread.update_progress.connect(self.update_progress_bar)
         self.processing_thread.processing_complete.connect(self.on_processing_complete)
 
@@ -358,8 +434,25 @@ class PDFOCRApp(QMainWindow):
         # Start processing
         self.processing_thread.start()
 
+    def update_page_results(self, page_num, ref_num, bill):
+        # Store results for specific page
+        self.page_results[page_num] = {
+            'ref_num': ref_num,
+            'bill': bill
+        }
+
+        # If this is the current page, update sidebar
+        if page_num == self.current_page_num:
+            self.sidebar.ref_num_edit.setText(ref_num)
+            self.sidebar.bill_edit.setText(bill)
+
     def update_progress_bar(self, value):
         self.progress_bar.setValue(value)
+
+    def update_sidebar_results(self, ref_num, bill):
+        # Update sidebar labels from processing thread
+        self.sidebar.ref_num_label.setText(f"Reference Number: {ref_num}")
+        self.sidebar.bill_label.setText(f"Total Bill: {bill} PKR")
 
     def on_processing_complete(self):
         # Update processed pages
@@ -457,6 +550,16 @@ class PDFOCRApp(QMainWindow):
         self.image_label.setPixmap(pixmap)
         self.image_label.setAlignment(Qt.AlignCenter)
 
+        # Update results for current page
+        if self.current_page_num in self.page_results:
+            result = self.page_results[self.current_page_num]
+            self.sidebar.ref_num_edit.setText(result.get('ref_num', 'N/A'))
+            self.sidebar.bill_edit.setText(result.get('bill', 'N/A'))
+        else:
+            # Reset if no results for this page
+            self.sidebar.ref_num_edit.setText('N/A')
+            self.sidebar.bill_edit.setText('N/A')
+
     def process_current_page(self):
         if not self.pdf_document:
             return
@@ -478,6 +581,16 @@ class PDFOCRApp(QMainWindow):
 
             # Draw bounding boxes with OCR text and summary
             output_image, bill_text, ref_num_text = self.draw_bboxes_with_ocr(img_cv, boxes)
+
+        # Store results for this page
+        self.page_results[self.current_page_num] = {
+            'ref_num': ref_num_text,
+            'bill': bill_text
+        }
+
+        # Update sidebar labels
+        self.sidebar.ref_num_edit.setText(ref_num_text)
+        self.sidebar.bill_edit.setText(bill_text)
 
         # Convert processed image back to QImage for display
         output_image_rgb = cv2.cvtColor(output_image, cv2.COLOR_BGR2RGB)
