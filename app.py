@@ -3,13 +3,14 @@ import cv2
 import re
 import fitz  # PyMuPDF
 import numpy as np
+import csv
 from ultralytics import YOLO
 from paddleocr import PaddleOCR
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout,
     QLabel, QFileDialog, QWidget, QScrollArea, QProgressBar,
-    QSplitter, QFrame, QGraphicsDropShadowEffect, QLineEdit
+    QSplitter, QFrame, QGraphicsDropShadowEffect, QLineEdit, QMessageBox
 )
 from PyQt5.QtGui import (
     QPixmap, QImage, QIcon, QPalette, QColor,
@@ -140,28 +141,29 @@ class SideBar(QFrame):
         layout.addWidget(results_header)
 
         # Reference Number Section
-        ref_num_layout = QHBoxLayout()
         ref_num_label = QLabel("Reference Number:")
-        self.ref_num_edit = StyledLineEdit("Reference Number")
-        ref_num_layout.addWidget(ref_num_label)
-        ref_num_layout.addWidget(self.ref_num_edit)
-        ref_num_widget = QWidget()
-        ref_num_widget.setLayout(ref_num_layout)
-        layout.addWidget(ref_num_widget)
+        ref_num_label.setStyleSheet("""
+            color: #ecf0f1;
+            margin-bottom: 5px;
+        """)
+        layout.addWidget(ref_num_label)
+        self.ref_num_edit = StyledLineEdit("Enter Reference Number")
+        layout.addWidget(self.ref_num_edit)
 
         # Total Bill Section
-        bill_layout = QHBoxLayout()
         bill_label = QLabel("Total Bill (PKR):")
-        self.bill_edit = StyledLineEdit("Total Bill")
-        bill_layout.addWidget(bill_label)
-        bill_layout.addWidget(self.bill_edit)
-        bill_widget = QWidget()
-        bill_widget.setLayout(bill_layout)
-        layout.addWidget(bill_widget)
+        bill_label.setStyleSheet("""
+            color: #ecf0f1;
+            margin-bottom: 5px;
+        """)
+        layout.addWidget(bill_label)
+        self.bill_edit = StyledLineEdit("Enter Total Bill")
+        layout.addWidget(self.bill_edit)
+        self.save_csv_btn = StyledButton("Save to CSV", "icons/save.png")
+        layout.addWidget(self.save_csv_btn)
 
         # Add stretch to push items to top
         layout.addStretch(1)
-
 
 
 class ProcessPagesThread(QThread):
@@ -329,16 +331,17 @@ class PDFOCRApp(QMainWindow):
         self.setWindowTitle("Professional PDF OCR Detection")
         self.setGeometry(100, 100, 1200, 800)
         self.page_results = {}
+        self.sidebar = SideBar()
         self.page_result_signal.connect(self.update_page_results)
+        self.sidebar.ref_num_edit.textChanged.connect(self.save_ref_num)
+        self.sidebar.bill_edit.textChanged.connect(self.save_bill)
+        self.sidebar.save_csv_btn.clicked.connect(self.save_results_to_csv)
 
         # Main widget
         main_widget = QWidget()
         main_layout = QHBoxLayout()
         main_widget.setLayout(main_layout)
         self.setCentralWidget(main_widget)
-
-        # Create sidebar
-        self.sidebar = SideBar()
 
         # Progress Bar
         self.progress_bar = QProgressBar()
@@ -401,6 +404,18 @@ class PDFOCRApp(QMainWindow):
                 background-color: #ecf0f1;
             }
         """)
+
+    def save_ref_num(self, text):
+        # Save the edited reference number for the current page
+        if self.pdf_document:
+            self.page_results[self.current_page_num] = self.page_results.get(self.current_page_num, {})
+            self.page_results[self.current_page_num]['ref_num'] = text
+
+    def save_bill(self, text):
+        # Save the edited bill for the current page
+        if self.pdf_document:
+            self.page_results[self.current_page_num] = self.page_results.get(self.current_page_num, {})
+            self.page_results[self.current_page_num]['bill'] = text
 
     def load_models(self):
         try:
@@ -466,6 +481,46 @@ class PDFOCRApp(QMainWindow):
 
         # Redisplay current page
         self.display_page()
+
+    def save_results_to_csv(self):
+        # Check if we have any processed results
+        if not self.page_results:
+            QMessageBox.warning(self, "No Results", "No processed pages found. Please process PDF pages first.")
+            return
+
+        # Open file dialog to choose save location
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Results", "", "CSV Files (*.csv)")
+
+        if file_path:
+            try:
+                with open(file_path, 'w', newline='', encoding='utf-8-sig') as csvfile:
+                    # Create CSV writer
+                    csv_writer = csv.writer(csvfile, quoting=csv.QUOTE_ALL)
+
+                    # Write header
+                    csv_writer.writerow(['Page', 'Reference Number', 'Total Bill (PKR)'])
+
+                    # Sort results by page number
+                    sorted_pages = sorted(self.page_results.items())
+
+                    # Write each page's results
+                    for page_num, result in sorted_pages:
+                        # Ensure reference number is treated as text
+                        ref_num = result.get('ref_num', 'N/A')
+                        ref_num = f"=\"{ref_num}\"" if ref_num != 'N/A' else 'N/A'
+
+                        csv_writer.writerow([
+                            page_num + 1,  # Add 1 to make page numbers more user-friendly
+                            ref_num,
+                            result.get('bill', 'N/A')
+                        ])
+
+                # Show success message
+                QMessageBox.information(self, "Success", f"Results saved to {file_path}")
+
+            except Exception as e:
+                # Show error if saving fails
+                QMessageBox.critical(self, "Error", f"Could not save CSV: {str(e)}")
 
     def disable_buttons_during_processing(self):
         self.sidebar.prev_btn.setEnabled(False)
@@ -582,15 +637,18 @@ class PDFOCRApp(QMainWindow):
             # Draw bounding boxes with OCR text and summary
             output_image, bill_text, ref_num_text = self.draw_bboxes_with_ocr(img_cv, boxes)
 
-        # Store results for this page
-        self.page_results[self.current_page_num] = {
-            'ref_num': ref_num_text,
-            'bill': bill_text
-        }
+        # Only update if not already manually edited
+        if self.current_page_num not in self.page_results or \
+           self.page_results[self.current_page_num].get('ref_num') == 'N/A':
+            # Store results for this page
+            self.page_results[self.current_page_num] = {
+                'ref_num': ref_num_text,
+                'bill': bill_text
+            }
 
-        # Update sidebar labels
-        self.sidebar.ref_num_edit.setText(ref_num_text)
-        self.sidebar.bill_edit.setText(bill_text)
+            # Update sidebar labels
+            self.sidebar.ref_num_edit.setText(ref_num_text)
+            self.sidebar.bill_edit.setText(bill_text)
 
         # Convert processed image back to QImage for display
         output_image_rgb = cv2.cvtColor(output_image, cv2.COLOR_BGR2RGB)
