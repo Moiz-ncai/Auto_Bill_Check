@@ -10,10 +10,100 @@ from paddleocr import PaddleOCR
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout,
-    QLabel, QFileDialog, QWidget, QScrollArea, QProgressBar
+    QLabel, QFileDialog, QWidget, QScrollArea, QProgressBar,
+    QSplitter, QFrame, QGraphicsDropShadowEffect
 )
-from PyQt5.QtGui import QPixmap, QImage
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import (
+    QPixmap, QImage, QIcon, QPalette, QColor,
+    QLinearGradient, QPainter, QFont
+)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize
+
+
+class StyledButton(QPushButton):
+    def __init__(self, text, icon=None):
+        super().__init__(text)
+
+        # Set a modern, clean font
+        font = QFont("Segoe UI", 10)
+        self.setFont(font)
+
+        # Style the button
+        self.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                text-align: left;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+            QPushButton:disabled {
+                background-color: #bdc3c7;
+                color: #7f8c8d;
+            }
+        """)
+
+        # Set icon if provided
+        if icon:
+            self.setIcon(QIcon(icon))
+            self.setIconSize(QSize(20, 20))
+
+
+class SideBar(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        # Sidebar styling
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #2c3e50;
+                color: white;
+                padding: 10px;
+            }
+        """)
+
+        # Layout
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+
+        # File Selection
+        self.file_path_label = QLabel("No PDF selected")
+        self.file_path_label.setStyleSheet("""
+            color: #ecf0f1;
+            font-size: 10px;
+            margin-bottom: 10px;
+        """)
+        layout.addWidget(self.file_path_label)
+
+        # Buttons
+        self.select_pdf_btn = StyledButton("Select PDF", "icons/open.png")
+        self.prev_btn = StyledButton("Previous Page", "icons/previous.png")
+        self.next_btn = StyledButton("Next Page", "icons/next.png")
+        self.process_current_btn = StyledButton("Process Page", "icons/process.png")
+        self.process_all_btn = StyledButton("Process All Pages", "icons/process_all.png")
+
+        # Add buttons to layout
+        layout.addWidget(self.select_pdf_btn)
+        layout.addWidget(self.prev_btn)
+        layout.addWidget(self.next_btn)
+        layout.addWidget(self.process_current_btn)
+        layout.addWidget(self.process_all_btn)
+
+        # Page info
+        self.page_label = QLabel("Page: 0/0")
+        self.page_label.setStyleSheet("""
+            color: #bdc3c7;
+            font-size: 10px;
+            margin-top: 10px;
+        """)
+        layout.addWidget(self.page_label)
+
+        # Add stretch to push items to top
+        layout.addStretch(1)
 
 
 class ProcessPagesThread(QThread):
@@ -167,71 +257,79 @@ class ProcessPagesThread(QThread):
 class PDFOCRApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PDF OCR Detection App")
-        self.setGeometry(100, 100, 1000, 800)
+        self.setWindowTitle("Professional PDF OCR Detection")
+        self.setGeometry(100, 100, 1200, 800)
 
-        # Main widget and layout
+        # Main widget
         main_widget = QWidget()
-        main_layout = QVBoxLayout()
+        main_layout = QHBoxLayout()
         main_widget.setLayout(main_layout)
         self.setCentralWidget(main_widget)
 
-        # PDF File Selection Section
-        file_layout = QHBoxLayout()
-        self.file_path_label = QLabel("No PDF selected")
-        select_pdf_btn = QPushButton("Select PDF")
-        select_pdf_btn.clicked.connect(self.select_pdf)
-        file_layout.addWidget(self.file_path_label)
-        file_layout.addWidget(select_pdf_btn)
-        main_layout.addLayout(file_layout)
-
-        # Navigation and Processing Section
-        nav_layout = QHBoxLayout()
-        self.prev_btn = QPushButton("Previous Page")
-        self.next_btn = QPushButton("Next Page")
-        self.process_current_btn = QPushButton("Process Current Page")
-        self.process_all_btn = QPushButton("Process All Pages")
-        self.page_label = QLabel("Page: 0/0")
-
-        self.prev_btn.clicked.connect(self.previous_page)
-        self.next_btn.clicked.connect(self.next_page)
-        self.process_current_btn.clicked.connect(self.process_current_page)
-        self.process_all_btn.clicked.connect(self.process_all_pages)
-
-        nav_layout.addWidget(self.prev_btn)
-        nav_layout.addWidget(self.page_label)
-        nav_layout.addWidget(self.next_btn)
-        nav_layout.addWidget(self.process_current_btn)
-        nav_layout.addWidget(self.process_all_btn)
-        main_layout.addLayout(nav_layout)
+        # Create sidebar
+        self.sidebar = SideBar()
 
         # Progress Bar
         self.progress_bar = QProgressBar()
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid grey;
+                border-radius: 5px;
+                text-align: center;
+            }
+            QProgressBar::chunk {
+                background-color: #3498db;
+                width: 10px;
+                margin: 0.5px;
+            }
+        """)
         self.progress_bar.setRange(0, 100)
-        self.progress_bar.hide()  # Initially hidden
-        main_layout.addWidget(self.progress_bar)
+        self.progress_bar.hide()
 
         # Image Display Area
         self.scroll_area = QScrollArea()
         self.image_label = QLabel()
         self.scroll_area.setWidget(self.image_label)
         self.scroll_area.setWidgetResizable(True)
-        main_layout.addWidget(self.scroll_area)
 
-        # Initialize variables
+        # Main content layout (scroll area + progress bar)
+        content_layout = QVBoxLayout()
+        content_layout.addWidget(self.scroll_area)
+        content_layout.addWidget(self.progress_bar)
+
+        content_widget = QWidget()
+        content_widget.setLayout(content_layout)
+
+        # Add sidebar and content to main layout
+        main_layout.addWidget(self.sidebar, 1)
+        main_layout.addWidget(content_widget, 4)
+
+        # Connect sidebar buttons
+        self.sidebar.select_pdf_btn.clicked.connect(self.select_pdf)
+        self.sidebar.prev_btn.clicked.connect(self.previous_page)
+        self.sidebar.next_btn.clicked.connect(self.next_page)
+        self.sidebar.process_current_btn.clicked.connect(self.process_current_page)
+        self.sidebar.process_all_btn.clicked.connect(self.process_all_pages)
+
+        # Initialize rest of the application as before
         self.pdf_document = None
         self.current_page_num = 0
         self.total_pages = 0
-
-        # Dictionary to store processed page images
         self.processed_pages = {}
         self.original_pages = {}
 
-        # Disable navigation buttons initially
+        # Load models
+        self.load_models()
+
+        # Update initial button states
         self.update_navigation_buttons()
 
-        # Load YOLO and OCR models
-        self.load_models()
+        # Apply overall window styling
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #ecf0f1;
+            }
+        """)
 
     def load_models(self):
         try:
@@ -277,18 +375,21 @@ class PDFOCRApp(QMainWindow):
         self.display_page()
 
     def disable_buttons_during_processing(self):
-        self.prev_btn.setEnabled(False)
-        self.next_btn.setEnabled(False)
-        self.process_current_btn.setEnabled(False)
-        self.process_all_btn.setEnabled(False)
+        self.sidebar.prev_btn.setEnabled(False)
+        self.sidebar.next_btn.setEnabled(False)
+        self.sidebar.process_current_btn.setEnabled(False)
+        self.sidebar.process_all_btn.setEnabled(False)
+        self.sidebar.select_pdf_btn.setEnabled(False)
 
     def enable_buttons_after_processing(self):
         self.update_navigation_buttons()
+        self.sidebar.select_pdf_btn.setEnabled(True)
 
     def select_pdf(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select PDF", "", "PDF Files (*.pdf)")
         if file_path:
-            self.file_path_label.setText(file_path)
+            # Use the sidebar's file path label
+            self.sidebar.file_path_label.setText(file_path)
             self.open_pdf(file_path)
 
     def open_pdf(self, pdf_path):
@@ -349,8 +450,8 @@ class PDFOCRApp(QMainWindow):
             qimg = QImage(original_img_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(qimg)
 
-        # Update page label
-        self.page_label.setText(f"Page: {self.current_page_num + 1}/{self.total_pages}")
+        # Update page label using sidebar's page label
+        self.sidebar.page_label.setText(f"Page: {self.current_page_num + 1}/{self.total_pages}")
 
         # Display image
         self.image_label.setPixmap(pixmap)
@@ -406,14 +507,19 @@ class PDFOCRApp(QMainWindow):
 
     def update_navigation_buttons(self):
         # Disable previous button on first page
-        self.prev_btn.setEnabled(self.current_page_num > 0)
+        self.sidebar.prev_btn.setEnabled(self.current_page_num > 0)
 
         # Disable next button on last page
-        self.next_btn.setEnabled(self.current_page_num < self.total_pages - 1 if self.pdf_document else False)
+        self.sidebar.next_btn.setEnabled(
+            self.current_page_num < self.total_pages - 1 if self.pdf_document else False
+        )
 
         # Disable process buttons if no PDF is loaded
-        self.process_current_btn.setEnabled(self.pdf_document is not None)
-        self.process_all_btn.setEnabled(self.pdf_document is not None)
+        self.sidebar.process_current_btn.setEnabled(self.pdf_document is not None)
+        self.sidebar.process_all_btn.setEnabled(self.pdf_document is not None)
+
+        # Update page label
+        self.sidebar.page_label.setText(f"Page: {self.current_page_num + 1}/{self.total_pages}")
 
     def validate_ref_num(self, text):
         # Remove any special characters and spaces
@@ -502,11 +608,16 @@ class PDFOCRApp(QMainWindow):
         # Simple error handling (you could use QMessageBox for a more robust solution)
         print(f"Error: {message}")
 
+
 def main():
     app = QApplication(sys.argv)
+
+    app.setFont(QFont("Segoe UI", 10))
+
     main_window = PDFOCRApp()
     main_window.show()
     sys.exit(app.exec_())
+
 
 if __name__ == "__main__":
     main()
