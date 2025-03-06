@@ -122,6 +122,11 @@ class SideBar(QFrame):
         layout.addWidget(self.process_current_btn)
         layout.addWidget(self.process_all_btn)
 
+        # NEW: Add filter button for invalid reference numbers
+        self.filter_invalid_btn = StyledButton("Show Invalid References", "icons/filter.png")
+        self.filter_invalid_btn.setCheckable(True)  # Make it toggleable
+        layout.addWidget(self.filter_invalid_btn)
+
         # Page info
         self.page_label = QLabel("Page: 0/0")
         self.page_label.setStyleSheet("""
@@ -338,6 +343,11 @@ class PDFOCRApp(QMainWindow):
         self.sidebar.bill_edit.textChanged.connect(self.save_bill)
         self.sidebar.save_csv_btn.clicked.connect(self.save_results_to_csv)
 
+        self.sidebar.filter_invalid_btn.clicked.connect(self.toggle_invalid_filter)
+
+        self.show_only_invalid = False
+        self.invalid_pages = []
+
         # Main widget
         main_widget = QWidget()
         main_layout = QHBoxLayout()
@@ -406,16 +416,68 @@ class PDFOCRApp(QMainWindow):
             }
         """)
 
+    def toggle_invalid_filter(self):
+        """Toggle between showing all pages and showing only pages with invalid reference numbers"""
+        self.show_only_invalid = self.sidebar.filter_invalid_btn.isChecked()
+
+        if self.show_only_invalid:
+            # Update the button text to indicate current state
+            self.sidebar.filter_invalid_btn.setText("Show All Pages")
+
+            # Find all pages with invalid reference numbers
+            self.invalid_pages = [
+                page_num for page_num, result in self.page_results.items()
+                if not result.get('ref_num_valid', True)
+            ]
+
+            if not self.invalid_pages:
+                # No invalid pages found
+                QMessageBox.information(self, "No Invalid References",
+                                        "No pages with invalid reference numbers were found.")
+                self.sidebar.filter_invalid_btn.setChecked(False)
+                self.show_only_invalid = False
+                return
+
+            # Navigate to the first invalid page
+            if self.invalid_pages:
+                self.current_page_num = self.invalid_pages[0]
+                self.display_page()
+                self.update_navigation_buttons()
+        else:
+            # Restore normal navigation
+            self.sidebar.filter_invalid_btn.setText("Show Invalid References")
+            self.invalid_pages = []
+            self.update_navigation_buttons()
+
     def validate_and_save_ref_num(self, text):
         """Validate and save the reference number when it's edited"""
         if self.pdf_document:
             # Validate the reference number format
             cleaned_text, is_valid = self.validate_ref_num(text)
 
+            # Get the previous validation state (if it exists)
+            previous_state = self.page_results.get(self.current_page_num, {}).get('ref_num_valid', True)
+
             # Store the results
             self.page_results[self.current_page_num] = self.page_results.get(self.current_page_num, {})
             self.page_results[self.current_page_num]['ref_num'] = text
             self.page_results[self.current_page_num]['ref_num_valid'] = is_valid
+
+            # If we're in filter mode and validation state changed, we might need to update the filter
+            if self.show_only_invalid and previous_state != is_valid:
+                if is_valid and self.current_page_num in self.invalid_pages:
+                    # Page is now valid, remove from invalid list
+                    self.invalid_pages.remove(self.current_page_num)
+                    if not self.invalid_pages:
+                        # No more invalid pages, turn off filter
+                        QMessageBox.information(self, "No Invalid References",
+                                                "All reference numbers are now valid!")
+                        self.sidebar.filter_invalid_btn.setChecked(False)
+                        self.show_only_invalid = False
+                elif not is_valid and self.current_page_num not in self.invalid_pages:
+                    # Page is now invalid, add to invalid list
+                    self.invalid_pages.append(self.current_page_num)
+                    self.invalid_pages.sort()  # Keep the list in order
 
             # Update the text box styling based on validation
             if is_valid:
@@ -445,6 +507,9 @@ class PDFOCRApp(QMainWindow):
                         border: 1px solid #e74c3c;
                     }
                 """)
+
+            # Update navigation buttons in case filter state changed
+            self.update_navigation_buttons()
 
     def save_bill(self, text):
         # Save the edited bill for the current page
@@ -538,6 +603,20 @@ class PDFOCRApp(QMainWindow):
         # Update processed pages
         self.processed_pages = self.processing_thread.processed_pages
 
+        # If we're in filter mode, update the invalid pages list
+        if self.show_only_invalid:
+            self.invalid_pages = [
+                page_num for page_num, result in self.page_results.items()
+                if not result.get('ref_num_valid', True)
+            ]
+
+            if not self.invalid_pages:
+                # No invalid pages found after processing
+                QMessageBox.information(self, "No Invalid References",
+                                        "All processed pages have valid reference numbers.")
+                self.sidebar.filter_invalid_btn.setChecked(False)
+                self.show_only_invalid = False
+
         # Hide progress bar
         self.progress_bar.hide()
 
@@ -546,6 +625,12 @@ class PDFOCRApp(QMainWindow):
 
         # Redisplay current page
         self.display_page()
+
+        # Show summary of invalid pages
+        invalid_count = len([1 for result in self.page_results.values() if not result.get('ref_num_valid', True)])
+        if invalid_count > 0:
+            QMessageBox.information(self, "Processing Complete",
+                                    f"Processing complete. Found {invalid_count} pages with invalid reference numbers.")
 
     def save_results_to_csv(self):
         # Check if we have any processed results
@@ -808,32 +893,70 @@ class PDFOCRApp(QMainWindow):
         self.image_label.setAlignment(Qt.AlignCenter)
 
     def next_page(self):
-        if self.current_page_num < self.total_pages - 1:
-            self.current_page_num += 1
-            self.display_page()
-            self.update_navigation_buttons()
+        """Navigate to the next page, respecting the filter if active"""
+        if not self.pdf_document:
+            return
+
+        if self.show_only_invalid and self.invalid_pages:
+            # Find the next invalid page
+            current_index = self.invalid_pages.index(
+                self.current_page_num) if self.current_page_num in self.invalid_pages else -1
+            if current_index < len(self.invalid_pages) - 1:
+                self.current_page_num = self.invalid_pages[current_index + 1]
+                self.display_page()
+                self.update_navigation_buttons()
+        else:
+            # Normal navigation
+            if self.current_page_num < self.total_pages - 1:
+                self.current_page_num += 1
+                self.display_page()
+                self.update_navigation_buttons()
 
     def previous_page(self):
-        if self.current_page_num > 0:
-            self.current_page_num -= 1
-            self.display_page()
-            self.update_navigation_buttons()
+        """Navigate to the previous page, respecting the filter if active"""
+        if not self.pdf_document:
+            return
+
+        if self.show_only_invalid and self.invalid_pages:
+            # Find the previous invalid page
+            current_index = self.invalid_pages.index(
+                self.current_page_num) if self.current_page_num in self.invalid_pages else len(self.invalid_pages)
+            if current_index > 0:
+                self.current_page_num = self.invalid_pages[current_index - 1]
+                self.display_page()
+                self.update_navigation_buttons()
+        else:
+            # Normal navigation
+            if self.current_page_num > 0:
+                self.current_page_num -= 1
+                self.display_page()
+                self.update_navigation_buttons()
 
     def update_navigation_buttons(self):
-        # Disable previous button on first page
-        self.sidebar.prev_btn.setEnabled(self.current_page_num > 0)
+        """Update navigation buttons based on current page and filter state"""
+        if self.show_only_invalid and self.invalid_pages:
+            # When filtering, base navigation on the filtered list
+            current_index = self.invalid_pages.index(
+                self.current_page_num) if self.current_page_num in self.invalid_pages else -1
+            self.sidebar.prev_btn.setEnabled(current_index > 0)
+            self.sidebar.next_btn.setEnabled(current_index < len(self.invalid_pages) - 1)
 
-        # Disable next button on last page
-        self.sidebar.next_btn.setEnabled(
-            self.current_page_num < self.total_pages - 1 if self.pdf_document else False
-        )
+            # Update page label to show both absolute page number and position in filtered list
+            if current_index >= 0:
+                self.sidebar.page_label.setText(
+                    f"Page: {self.current_page_num + 1}/{self.total_pages} (Invalid: {current_index + 1}/{len(self.invalid_pages)})")
+            else:
+                self.sidebar.page_label.setText(f"Page: {self.current_page_num + 1}/{self.total_pages}")
+        else:
+            # Normal navigation logic
+            self.sidebar.prev_btn.setEnabled(self.current_page_num > 0)
+            self.sidebar.next_btn.setEnabled(
+                self.current_page_num < self.total_pages - 1 if self.pdf_document else False)
+            self.sidebar.page_label.setText(f"Page: {self.current_page_num + 1}/{self.total_pages}")
 
-        # Disable process buttons if no PDF is loaded
+        # Process buttons should always be enabled if a PDF is loaded
         self.sidebar.process_current_btn.setEnabled(self.pdf_document is not None)
         self.sidebar.process_all_btn.setEnabled(self.pdf_document is not None)
-
-        # Update page label
-        self.sidebar.page_label.setText(f"Page: {self.current_page_num + 1}/{self.total_pages}")
 
     def validate_ref_num(self, text):
         # Remove any special characters and spaces
