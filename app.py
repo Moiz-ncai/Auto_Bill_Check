@@ -175,7 +175,7 @@ class ProcessPagesThread(QThread):
         self.pdf_document = pdf_document
         self.model = model
         self.ocr = ocr
-        self.result_signal = result_signal  # Store the signal passed from main app
+        self.result_signal = result_signal
         self.processed_pages = {}
 
     def run(self):
@@ -188,6 +188,7 @@ class ProcessPagesThread(QThread):
             # Default values in case no detection occurs
             bill_text = "N/A"
             ref_num_text = "N/A"
+            ref_num_valid = True
 
             # Run inference
             results = self.model(img_cv, conf=0.2)
@@ -198,10 +199,10 @@ class ProcessPagesThread(QThread):
                 boxes = result.boxes
 
                 # Draw bounding boxes with OCR text and summary
-                output_image, bill_text, ref_num_text = self.draw_bboxes_with_ocr(img_cv, boxes)
+                output_image, bill_text, ref_num_text, ref_num_valid = self.draw_bboxes_with_ocr(img_cv, boxes)
 
                 # Emit results for this page using the passed signal
-                self.result_signal.emit(page_num, ref_num_text, bill_text)
+                self.result_signal.emit(page_num, ref_num_text, bill_text, ref_num_valid)
 
             # Convert processed image back to QPixmap
             output_image_rgb = cv2.cvtColor(output_image, cv2.COLOR_BGR2RGB)
@@ -219,7 +220,6 @@ class ProcessPagesThread(QThread):
 
         # Signal processing is complete
         self.processing_complete.emit()
-
 
     def render_page(self, page):
         # Render page to an image with better quality
@@ -241,6 +241,7 @@ class ProcessPagesThread(QThread):
 
     def draw_bboxes_with_ocr(self, image, boxes):
         bill_text, ref_num_text = "N/A", "N/A"
+        ref_num_valid = True  # Default to valid
 
         # Group boxes by class and select the highest confidence detection for each class
         class_detections = {}
@@ -281,7 +282,7 @@ class ProcessPagesThread(QThread):
             if class_id == 2 and detected_texts:
                 # Validate reference number format
                 detected_text = detected_texts[0]  # Keep only the first detected line for 'ref_num'
-                ref_num_text = self.validate_ref_num(detected_text)
+                ref_num_text, ref_num_valid = self.validate_ref_num(detected_text)
             elif class_id == 0:
                 detected_text = " ".join(detected_texts).strip() if detected_texts else "N/A"
                 bill_text = detected_text
@@ -311,29 +312,29 @@ class ProcessPagesThread(QThread):
             cv2.putText(image, line, (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             y_offset += 30
 
-        return image, bill_text, ref_num_text
-
+        return image, bill_text, ref_num_text, ref_num_valid
     def validate_ref_num(self, text):
         # Remove any special characters and spaces
         cleaned_text = re.sub(r'[^0-9]', '', text)
 
-        # Check if the format is 14 digits followed by 'U'
-        if re.match(r'^\d{14}$', cleaned_text):
-            return cleaned_text
-        return "N/A"
+        # Check if the format is 14 digits
+        is_valid = re.match(r'^\d{14}$', cleaned_text) is not None
+
+        # Return both the original text and a validation flag
+        return cleaned_text, is_valid
 
 
 class PDFOCRApp(QMainWindow):
-    page_result_signal = pyqtSignal(int, str, str)
+    page_result_signal = pyqtSignal(int, str, str, bool)
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Professional PDF OCR Detection")
-        self.setGeometry(100, 100, 1200, 800)
+        self.setGeometry(100, 100, 1400, 800)
         self.page_results = {}
         self.sidebar = SideBar()
         self.page_result_signal.connect(self.update_page_results)
-        self.sidebar.ref_num_edit.textChanged.connect(self.save_ref_num)
+        self.sidebar.ref_num_edit.textChanged.connect(self.validate_and_save_ref_num)
         self.sidebar.bill_edit.textChanged.connect(self.save_bill)
         self.sidebar.save_csv_btn.clicked.connect(self.save_results_to_csv)
 
@@ -405,11 +406,45 @@ class PDFOCRApp(QMainWindow):
             }
         """)
 
-    def save_ref_num(self, text):
-        # Save the edited reference number for the current page
+    def validate_and_save_ref_num(self, text):
+        """Validate and save the reference number when it's edited"""
         if self.pdf_document:
+            # Validate the reference number format
+            cleaned_text, is_valid = self.validate_ref_num(text)
+
+            # Store the results
             self.page_results[self.current_page_num] = self.page_results.get(self.current_page_num, {})
             self.page_results[self.current_page_num]['ref_num'] = text
+            self.page_results[self.current_page_num]['ref_num_valid'] = is_valid
+
+            # Update the text box styling based on validation
+            if is_valid:
+                self.sidebar.ref_num_edit.setStyleSheet("""
+                    QLineEdit {
+                        background-color: #34495e;
+                        color: white;
+                        border: 1px solid #2c3e50;
+                        padding: 5px;
+                        border-radius: 4px;
+                    }
+                    QLineEdit:focus {
+                        border: 1px solid #3498db;
+                    }
+                """)
+            else:
+                self.sidebar.ref_num_edit.setStyleSheet("""
+                    QLineEdit {
+                        background-color: #34495e;
+                        color: white;
+                        border: 1px solid #e74c3c;
+                        padding: 5px;
+                        border-radius: 4px;
+                        background-color: rgba(231, 76, 60, 0.3);
+                    }
+                    QLineEdit:focus {
+                        border: 1px solid #e74c3c;
+                    }
+                """)
 
     def save_bill(self, text):
         # Save the edited bill for the current page
@@ -449,17 +484,47 @@ class PDFOCRApp(QMainWindow):
         # Start processing
         self.processing_thread.start()
 
-    def update_page_results(self, page_num, ref_num, bill):
+    def update_page_results(self, page_num, ref_num, bill, ref_num_valid=True):
         # Store results for specific page
         self.page_results[page_num] = {
             'ref_num': ref_num,
-            'bill': bill
+            'bill': bill,
+            'ref_num_valid': ref_num_valid
         }
 
         # If this is the current page, update sidebar
         if page_num == self.current_page_num:
             self.sidebar.ref_num_edit.setText(ref_num)
             self.sidebar.bill_edit.setText(bill)
+
+            # Update text box styling based on validation
+            if ref_num_valid:
+                self.sidebar.ref_num_edit.setStyleSheet("""
+                    QLineEdit {
+                        background-color: #34495e;
+                        color: white;
+                        border: 1px solid #2c3e50;
+                        padding: 5px;
+                        border-radius: 4px;
+                    }
+                    QLineEdit:focus {
+                        border: 1px solid #3498db;
+                    }
+                """)
+            else:
+                self.sidebar.ref_num_edit.setStyleSheet("""
+                    QLineEdit {
+                        background-color: #34495e;
+                        color: white;
+                        border: 1px solid #e74c3c;
+                        padding: 5px;
+                        border-radius: 4px;
+                        background-color: rgba(231, 76, 60, 0.3);
+                    }
+                    QLineEdit:focus {
+                        border: 1px solid #e74c3c;
+                    }
+                """)
 
     def update_progress_bar(self, value):
         self.progress_bar.setValue(value)
@@ -610,10 +675,52 @@ class PDFOCRApp(QMainWindow):
             result = self.page_results[self.current_page_num]
             self.sidebar.ref_num_edit.setText(result.get('ref_num', 'N/A'))
             self.sidebar.bill_edit.setText(result.get('bill', 'N/A'))
+
+            # Update text box styling based on validation
+            if result.get('ref_num_valid', True):
+                self.sidebar.ref_num_edit.setStyleSheet("""
+                    QLineEdit {
+                        background-color: #34495e;
+                        color: white;
+                        border: 1px solid #2c3e50;
+                        padding: 5px;
+                        border-radius: 4px;
+                    }
+                    QLineEdit:focus {
+                        border: 1px solid #3498db;
+                    }
+                """)
+            else:
+                self.sidebar.ref_num_edit.setStyleSheet("""
+                    QLineEdit {
+                        background-color: #34495e;
+                        color: white;
+                        border: 1px solid #e74c3c;
+                        padding: 5px;
+                        border-radius: 4px;
+                        background-color: rgba(231, 76, 60, 0.3);
+                    }
+                    QLineEdit:focus {
+                        border: 1px solid #e74c3c;
+                    }
+                """)
         else:
             # Reset if no results for this page
             self.sidebar.ref_num_edit.setText('N/A')
             self.sidebar.bill_edit.setText('N/A')
+            # Reset to default styling
+            self.sidebar.ref_num_edit.setStyleSheet("""
+                QLineEdit {
+                    background-color: #34495e;
+                    color: white;
+                    border: 1px solid #2c3e50;
+                    padding: 5px;
+                    border-radius: 4px;
+                }
+                QLineEdit:focus {
+                    border: 1px solid #3498db;
+                }
+            """)
 
     def process_current_page(self):
         if not self.pdf_document:
@@ -629,26 +736,62 @@ class PDFOCRApp(QMainWindow):
 
         # Run inference
         results = self.model(img_cv, conf=0.2)
+
+        # Default values
+        bill_text = "N/A"
+        ref_num_text = "N/A"
+        ref_num_valid = True
+
         # Process results
         for result in results:
             # Get bounding boxes
             boxes = result.boxes
 
             # Draw bounding boxes with OCR text and summary
-            output_image, bill_text, ref_num_text = self.draw_bboxes_with_ocr(img_cv, boxes)
+            output_image, bill_text, ref_num_text, ref_num_valid = self.draw_bboxes_with_ocr(img_cv, boxes)
 
         # Only update if not already manually edited
         if self.current_page_num not in self.page_results or \
-           self.page_results[self.current_page_num].get('ref_num') == 'N/A':
+                self.page_results[self.current_page_num].get('ref_num') == 'N/A':
             # Store results for this page
             self.page_results[self.current_page_num] = {
                 'ref_num': ref_num_text,
-                'bill': bill_text
+                'bill': bill_text,
+                'ref_num_valid': ref_num_valid
             }
 
             # Update sidebar labels
             self.sidebar.ref_num_edit.setText(ref_num_text)
             self.sidebar.bill_edit.setText(bill_text)
+
+            # Update text box styling based on validation
+            if ref_num_valid:
+                self.sidebar.ref_num_edit.setStyleSheet("""
+                    QLineEdit {
+                        background-color: #34495e;
+                        color: white;
+                        border: 1px solid #2c3e50;
+                        padding: 5px;
+                        border-radius: 4px;
+                    }
+                    QLineEdit:focus {
+                        border: 1px solid #3498db;
+                    }
+                """)
+            else:
+                self.sidebar.ref_num_edit.setStyleSheet("""
+                    QLineEdit {
+                        background-color: #34495e;
+                        color: white;
+                        border: 1px solid #e74c3c;
+                        padding: 5px;
+                        border-radius: 4px;
+                        background-color: rgba(231, 76, 60, 0.3);
+                    }
+                    QLineEdit:focus {
+                        border: 1px solid #e74c3c;
+                    }
+                """)
 
         # Convert processed image back to QImage for display
         output_image_rgb = cv2.cvtColor(output_image, cv2.COLOR_BGR2RGB)
@@ -696,13 +839,16 @@ class PDFOCRApp(QMainWindow):
         # Remove any special characters and spaces
         cleaned_text = re.sub(r'[^0-9]', '', text)
 
-        # Check if the format is 14 digits followed by 'U'
-        if re.match(r'^\d{14}$', cleaned_text):
-            return cleaned_text
-        return "N/A"
+        # Check if the format is 14 digits
+        is_valid = re.match(r'^\d{14}$', cleaned_text) is not None
+
+        # Return both the original text and a validation flag
+        return cleaned_text, is_valid
 
     def draw_bboxes_with_ocr(self, image, boxes):
-        bill_text, ref_num_text = "N/A", "N/A"
+        bill_text = "N/A"
+        ref_num_text = "N/A"
+        ref_num_valid = True  # Default to valid
 
         # Group boxes by class and select the highest confidence detection for each class
         class_detections = {}
@@ -743,7 +889,9 @@ class PDFOCRApp(QMainWindow):
             if class_id == 2 and detected_texts:
                 # Validate reference number format
                 detected_text = detected_texts[0]  # Keep only the first detected line for 'ref_num'
-                ref_num_text = self.validate_ref_num(detected_text)
+                temp_ref_num, temp_valid = self.validate_ref_num(detected_text)
+                ref_num_text = temp_ref_num
+                ref_num_valid = temp_valid
             elif class_id == 0:
                 detected_text = " ".join(detected_texts).strip() if detected_texts else "N/A"
                 bill_text = detected_text
@@ -773,7 +921,8 @@ class PDFOCRApp(QMainWindow):
             cv2.putText(image, line, (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             y_offset += 30
 
-        return image, bill_text, ref_num_text
+        # Explicitly return all 4 values
+        return image, bill_text, ref_num_text, ref_num_valid
 
     def show_error_message(self, message):
         # Simple error handling (you could use QMessageBox for a more robust solution)
