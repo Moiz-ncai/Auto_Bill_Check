@@ -424,10 +424,10 @@ class PDFOCRApp(QMainWindow):
             # Update the button text to indicate current state
             self.sidebar.filter_invalid_btn.setText("Show All Pages")
 
-            # Find all pages with invalid reference numbers
+            # Find all pages with invalid reference numbers or N/A
             self.invalid_pages = [
                 page_num for page_num, result in self.page_results.items()
-                if not result.get('ref_num_valid', True)
+                if not result.get('ref_num_valid', True) or result.get('ref_num', '') == 'N/A'
             ]
 
             if not self.invalid_pages:
@@ -448,7 +448,6 @@ class PDFOCRApp(QMainWindow):
             self.sidebar.filter_invalid_btn.setText("Show Invalid References")
             self.invalid_pages = []
             self.update_navigation_buttons()
-
     def validate_and_save_ref_num(self, text):
         """Validate and save the reference number when it's edited"""
         if self.pdf_document:
@@ -607,7 +606,7 @@ class PDFOCRApp(QMainWindow):
         if self.show_only_invalid:
             self.invalid_pages = [
                 page_num for page_num, result in self.page_results.items()
-                if not result.get('ref_num_valid', True)
+                if not result.get('ref_num_valid', True) or result.get('ref_num', '') == 'N/A'
             ]
 
             if not self.invalid_pages:
@@ -627,11 +626,11 @@ class PDFOCRApp(QMainWindow):
         self.display_page()
 
         # Show summary of invalid pages
-        invalid_count = len([1 for result in self.page_results.values() if not result.get('ref_num_valid', True)])
+        invalid_count = len([1 for result in self.page_results.values()
+                             if not result.get('ref_num_valid', True) or result.get('ref_num', '') == 'N/A'])
         if invalid_count > 0:
             QMessageBox.information(self, "Processing Complete",
                                     f"Processing complete. Found {invalid_count} pages with invalid reference numbers.")
-
     def save_results_to_csv(self):
         # Check if we have any processed results
         if not self.page_results:
@@ -959,6 +958,10 @@ class PDFOCRApp(QMainWindow):
         self.sidebar.process_all_btn.setEnabled(self.pdf_document is not None)
 
     def validate_ref_num(self, text):
+        # Consider "N/A" as invalid
+        if text == "N/A":
+            return text, False
+
         # Remove any special characters and spaces
         cleaned_text = re.sub(r'[^0-9]', '', text)
 
