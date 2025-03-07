@@ -110,22 +110,62 @@ class SideBar(QFrame):
 
         # Buttons
         self.select_pdf_btn = StyledButton("Select PDF", "icons/open.png")
-        self.prev_btn = StyledButton("Previous Page", "icons/previous.png")
-        self.next_btn = StyledButton("Next Page", "icons/next.png")
         self.process_current_btn = StyledButton("Process Page", "icons/process.png")
-        self.process_all_btn = StyledButton("Process All Pages", "icons/process_all.png")
-
-        # Add buttons to layout
-        layout.addWidget(self.select_pdf_btn)
-        layout.addWidget(self.prev_btn)
-        layout.addWidget(self.next_btn)
-        layout.addWidget(self.process_current_btn)
-        layout.addWidget(self.process_all_btn)
+        self.process_all_btn = StyledButton("Process Entire Folder", "icons/process_all.png")
 
         # NEW: Add filter button for invalid reference numbers
         self.filter_invalid_btn = StyledButton("Show Invalid References", "icons/filter.png")
         self.filter_invalid_btn.setCheckable(True)  # Make it toggleable
+
+        # Add buttons to layout
+        layout.addWidget(self.select_pdf_btn)
+        layout.addWidget(self.process_current_btn)
+        layout.addWidget(self.process_all_btn)
         layout.addWidget(self.filter_invalid_btn)
+
+        # Navigation buttons in a horizontal layout
+        nav_layout = QHBoxLayout()
+        self.prev_btn = StyledButton("", "icons/previous.png")
+        self.next_btn = StyledButton("", "icons/next.png")
+        # Make the navigation buttons more compact
+        self.prev_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                padding: 8px 12px;
+                border-radius: 4px;
+                text-align: center;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+            QPushButton:disabled {
+                background-color: #bdc3c7;
+                color: #7f8c8d;
+            }
+        """)
+        self.next_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                padding: 8px 12px;
+                border-radius: 4px;
+                text-align: center;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+            QPushButton:disabled {
+                background-color: #bdc3c7;
+                color: #7f8c8d;
+            }
+        """)
+
+        nav_layout.addWidget(self.prev_btn)
+        nav_layout.addWidget(self.next_btn)
+        layout.addLayout(nav_layout)
 
         # Page info
         self.page_label = QLabel("Page: 0/0")
@@ -169,6 +209,27 @@ class SideBar(QFrame):
 
         # Add stretch to push items to top
         layout.addStretch(1)
+
+        # Add company logo at the bottom
+        self.logo_label = QLabel()
+        self.logo_label.setAlignment(Qt.AlignCenter)
+        try:
+            # Try to load the company logo - replace with your actual logo path
+            logo_pixmap = QPixmap("icons/company_logo.png")
+            logo_pixmap = logo_pixmap.scaled(250, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.logo_label.setPixmap(logo_pixmap)
+        except:
+            # If logo can't be loaded, display text instead
+            self.logo_label.setText("Intelligent Bill Reader")
+            self.logo_label.setStyleSheet("""
+                color: #ecf0f1;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 10px;
+                text-align: center;
+            """)
+
+        layout.addWidget(self.logo_label)
 
 
 class ProcessPagesThread(QThread):
@@ -318,6 +379,7 @@ class ProcessPagesThread(QThread):
             y_offset += 30
 
         return image, bill_text, ref_num_text, ref_num_valid
+
     def validate_ref_num(self, text):
         # Remove any special characters and spaces
         cleaned_text = re.sub(r'[^0-9]', '', text)
@@ -334,8 +396,8 @@ class PDFOCRApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Professional PDF OCR Detection")
-        self.setGeometry(100, 100, 1400, 800)
+        self.setWindowTitle("Intelligent Bill Reader")  # Changed window title
+        self.setGeometry(100, 100, 1300, 800)
         self.page_results = {}
         self.sidebar = SideBar()
         self.page_result_signal.connect(self.update_page_results)
@@ -448,6 +510,7 @@ class PDFOCRApp(QMainWindow):
             self.sidebar.filter_invalid_btn.setText("Show Invalid References")
             self.invalid_pages = []
             self.update_navigation_buttons()
+
     def validate_and_save_ref_num(self, text):
         """Validate and save the reference number when it's edited"""
         if self.pdf_document:
@@ -631,6 +694,7 @@ class PDFOCRApp(QMainWindow):
         if invalid_count > 0:
             QMessageBox.information(self, "Processing Complete",
                                     f"Processing complete. Found {invalid_count} pages with invalid reference numbers.")
+
     def save_results_to_csv(self):
         # Check if we have any processed results
         if not self.page_results:
