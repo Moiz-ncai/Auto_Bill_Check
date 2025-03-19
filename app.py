@@ -204,6 +204,17 @@ class SideBar(QFrame):
         layout.addWidget(bill_label)
         self.bill_edit = StyledLineEdit("Enter Total Bill")
         layout.addWidget(self.bill_edit)
+
+        # NEW: Units Section
+        units_label = QLabel("Electricity Units:")
+        units_label.setStyleSheet("""
+            color: #ecf0f1;
+            margin-bottom: 5px;
+        """)
+        layout.addWidget(units_label)
+        self.units_edit = StyledLineEdit("Enter Units")
+        layout.addWidget(self.units_edit)
+
         self.save_csv_btn = StyledButton("Save to CSV", "icons/save.png")
         layout.addWidget(self.save_csv_btn)
 
@@ -254,6 +265,7 @@ class ProcessPagesThread(QThread):
             # Default values in case no detection occurs
             bill_text = "N/A"
             ref_num_text = "N/A"
+            units_text = "N/A"  # NEW: Default units value
             ref_num_valid = True
 
             # Run inference
@@ -265,10 +277,11 @@ class ProcessPagesThread(QThread):
                 boxes = result.boxes
 
                 # Draw bounding boxes with OCR text and summary
-                output_image, bill_text, ref_num_text, ref_num_valid = self.draw_bboxes_with_ocr(img_cv, boxes)
+                output_image, bill_text, ref_num_text, units_text, ref_num_valid = self.draw_bboxes_with_ocr(img_cv,
+                                                                                                             boxes)
 
                 # Emit results for this page using the passed signal
-                self.result_signal.emit(page_num, ref_num_text, bill_text, ref_num_valid)
+                self.result_signal.emit(page_num, ref_num_text, bill_text, units_text, ref_num_valid)
 
             # Convert processed image back to QPixmap
             output_image_rgb = cv2.cvtColor(output_image, cv2.COLOR_BGR2RGB)
@@ -306,7 +319,7 @@ class ProcessPagesThread(QThread):
         return img_cv
 
     def draw_bboxes_with_ocr(self, image, boxes):
-        bill_text, ref_num_text = "N/A", "N/A"
+        bill_text, ref_num_text, units_text = "N/A", "N/A", "N/A"  # NEW: Added units_text
         ref_num_valid = True  # Default to valid
 
         # Group boxes by class and select the highest confidence detection for each class
@@ -315,8 +328,8 @@ class ProcessPagesThread(QThread):
             class_id = int(box.cls.item())
             conf = box.conf.item()
 
-            # Only process 'bill' (0) and 'ref_num' (2) classes
-            if class_id not in [0, 2]:
+            # Process 'bill' (0), 'ref_num' (2), and 'units' (3) classes
+            if class_id not in [0, 2, 3]:  # NEW: Added class 3 for units
                 continue
 
             # Keep the detection with the highest confidence for each class
@@ -352,11 +365,19 @@ class ProcessPagesThread(QThread):
             elif class_id == 0:
                 detected_text = " ".join(detected_texts).strip() if detected_texts else "N/A"
                 bill_text = detected_text
+            elif class_id == 3 and detected_texts:  # NEW: Process units class
+                detected_text = detected_texts[0]  # Keep first detected line for units
+                units_text = self.clean_units_text(detected_text)
             else:
                 detected_text = "N/A"
 
             # Get class color
-            color = (0, 255, 0) if class_id == 0 else (0, 0, 255)
+            if class_id == 0:  # Bill
+                color = (0, 255, 0)  # Green
+            elif class_id == 2:  # Reference Number
+                color = (0, 0, 255)  # Red
+            else:  # Units (class_id == 3)
+                color = (255, 0, 0)  # Blue
 
             # Draw bounding box
             cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
@@ -371,14 +392,14 @@ class ProcessPagesThread(QThread):
             cv2.putText(image, detected_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         # Draw summary text in the top-left corner
-        summary_text = f"Reference Number: {ref_num_text}\nTotal Bill: {bill_text} PKR"
-        cv2.rectangle(image, (10, 10), (500, 70), (0, 0, 0), -1)  # Black background
+        summary_text = f"Reference Number: {ref_num_text}\nTotal Bill: {bill_text} PKR\nUnits: {units_text}"  # NEW: Added units
+        cv2.rectangle(image, (10, 10), (500, 100), (0, 0, 0), -1)  # Extended black background
         y_offset = 30
         for line in summary_text.split("\n"):
             cv2.putText(image, line, (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             y_offset += 30
 
-        return image, bill_text, ref_num_text, ref_num_valid
+        return image, bill_text, ref_num_text, units_text, ref_num_valid
 
     def validate_ref_num(self, text):
         # Remove any special characters and spaces
@@ -390,9 +411,15 @@ class ProcessPagesThread(QThread):
         # Return both the original text and a validation flag
         return cleaned_text, is_valid
 
+    def clean_units_text(self, text):
+        # Remove any non-numeric characters
+        # This is a simple cleaning - adjust based on your specific format requirements
+        cleaned_text = re.sub(r'[^0-9.]', '', text)
+        return cleaned_text
+
 
 class PDFOCRApp(QMainWindow):
-    page_result_signal = pyqtSignal(int, str, str, bool)
+    page_result_signal = pyqtSignal(int, str, str, str, bool)  # NEW: Updated signal to include units
 
     def __init__(self):
         super().__init__()
@@ -403,6 +430,7 @@ class PDFOCRApp(QMainWindow):
         self.page_result_signal.connect(self.update_page_results)
         self.sidebar.ref_num_edit.textChanged.connect(self.validate_and_save_ref_num)
         self.sidebar.bill_edit.textChanged.connect(self.save_bill)
+        self.sidebar.units_edit.textChanged.connect(self.save_units)  # NEW: Units edit connection
         self.sidebar.save_csv_btn.clicked.connect(self.save_results_to_csv)
 
         self.sidebar.filter_invalid_btn.clicked.connect(self.toggle_invalid_filter)
@@ -579,9 +607,15 @@ class PDFOCRApp(QMainWindow):
             self.page_results[self.current_page_num] = self.page_results.get(self.current_page_num, {})
             self.page_results[self.current_page_num]['bill'] = text
 
+    def save_units(self, text):
+        # NEW: Save the edited units for the current page
+        if self.pdf_document:
+            self.page_results[self.current_page_num] = self.page_results.get(self.current_page_num, {})
+            self.page_results[self.current_page_num]['units'] = text
+
     def load_models(self):
         try:
-            self.model = YOLO("weights/best.pt")
+            self.model = YOLO("weights/best_new.pt")
             self.ocr = PaddleOCR(use_angle_cls=True, lang='en')
         except Exception as e:
             print(f"Error loading models: {e}")
@@ -611,11 +645,13 @@ class PDFOCRApp(QMainWindow):
         # Start processing
         self.processing_thread.start()
 
-    def update_page_results(self, page_num, ref_num, bill, ref_num_valid=True):
+    def update_page_results(self, page_num, ref_num, bill, units, ref_num_valid=True):
+        # NEW: Updated to include units
         # Store results for specific page
         self.page_results[page_num] = {
             'ref_num': ref_num,
             'bill': bill,
+            'units': units,  # NEW: Store units
             'ref_num_valid': ref_num_valid
         }
 
@@ -623,6 +659,7 @@ class PDFOCRApp(QMainWindow):
         if page_num == self.current_page_num:
             self.sidebar.ref_num_edit.setText(ref_num)
             self.sidebar.bill_edit.setText(bill)
+            self.sidebar.units_edit.setText(units)  # NEW: Update units field
 
             # Update text box styling based on validation
             if ref_num_valid:
@@ -655,11 +692,6 @@ class PDFOCRApp(QMainWindow):
 
     def update_progress_bar(self, value):
         self.progress_bar.setValue(value)
-
-    def update_sidebar_results(self, ref_num, bill):
-        # Update sidebar labels from processing thread
-        self.sidebar.ref_num_label.setText(f"Reference Number: {ref_num}")
-        self.sidebar.bill_label.setText(f"Total Bill: {bill} PKR")
 
     def on_processing_complete(self):
         # Update processed pages
@@ -711,7 +743,8 @@ class PDFOCRApp(QMainWindow):
                     csv_writer = csv.writer(csvfile, quoting=csv.QUOTE_ALL)
 
                     # Write header
-                    csv_writer.writerow(['Page', 'Reference Number', 'Total Bill (PKR)'])
+                    csv_writer.writerow(
+                        ['Page', 'Reference Number', 'Total Bill (PKR)', 'Units'])  # NEW: Added Units column
 
                     # Sort results by page number
                     sorted_pages = sorted(self.page_results.items())
@@ -725,9 +758,9 @@ class PDFOCRApp(QMainWindow):
                         csv_writer.writerow([
                             page_num + 1,  # Add 1 to make page numbers more user-friendly
                             ref_num,
-                            result.get('bill', 'N/A')
+                            result.get('bill', 'N/A'),
+                            result.get('units', 'N/A')
                         ])
-
                 # Show success message
                 QMessageBox.information(self, "Success", f"Results saved to {file_path}")
 
@@ -823,6 +856,7 @@ class PDFOCRApp(QMainWindow):
             result = self.page_results[self.current_page_num]
             self.sidebar.ref_num_edit.setText(result.get('ref_num', 'N/A'))
             self.sidebar.bill_edit.setText(result.get('bill', 'N/A'))
+            self.sidebar.units_edit.setText(result.get('units', 'N/A'))
 
             # Update text box styling based on validation
             if result.get('ref_num_valid', True):
@@ -856,6 +890,8 @@ class PDFOCRApp(QMainWindow):
             # Reset if no results for this page
             self.sidebar.ref_num_edit.setText('N/A')
             self.sidebar.bill_edit.setText('N/A')
+            self.sidebar.units_edit.setText('N/A')
+
             # Reset to default styling
             self.sidebar.ref_num_edit.setStyleSheet("""
                 QLineEdit {
@@ -888,6 +924,7 @@ class PDFOCRApp(QMainWindow):
         # Default values
         bill_text = "N/A"
         ref_num_text = "N/A"
+        units_num_text = "N/A"
         ref_num_valid = True
 
         # Process results
@@ -896,7 +933,8 @@ class PDFOCRApp(QMainWindow):
             boxes = result.boxes
 
             # Draw bounding boxes with OCR text and summary
-            output_image, bill_text, ref_num_text, ref_num_valid = self.draw_bboxes_with_ocr(img_cv, boxes)
+            output_image, bill_text, units_num_text, ref_num_text, ref_num_valid = self.draw_bboxes_with_ocr(img_cv,
+                                                                                                             boxes)
 
         # Only update if not already manually edited
         if self.current_page_num not in self.page_results or \
@@ -905,12 +943,14 @@ class PDFOCRApp(QMainWindow):
             self.page_results[self.current_page_num] = {
                 'ref_num': ref_num_text,
                 'bill': bill_text,
+                'units': units_num_text,
                 'ref_num_valid': ref_num_valid
             }
 
             # Update sidebar labels
             self.sidebar.ref_num_edit.setText(ref_num_text)
             self.sidebar.bill_edit.setText(bill_text)
+            self.sidebar.units_edit.setText(units_num_text)
 
             # Update text box styling based on validation
             if ref_num_valid:
@@ -1038,6 +1078,7 @@ class PDFOCRApp(QMainWindow):
     def draw_bboxes_with_ocr(self, image, boxes):
         bill_text = "N/A"
         ref_num_text = "N/A"
+        units_text = "N/A"
         ref_num_valid = True  # Default to valid
 
         # Group boxes by class and select the highest confidence detection for each class
@@ -1046,8 +1087,8 @@ class PDFOCRApp(QMainWindow):
             class_id = int(box.cls.item())
             conf = box.conf.item()
 
-            # Only process 'bill' (0) and 'ref_num' (2) classes
-            if class_id not in [0, 2]:
+            # Only process 'bill' (0), 'ref_num' (2) and 'units' (3) classes
+            if class_id not in [0, 2, 3]:
                 continue
 
             # Keep the detection with the highest confidence for each class
@@ -1085,11 +1126,21 @@ class PDFOCRApp(QMainWindow):
             elif class_id == 0:
                 detected_text = " ".join(detected_texts).strip() if detected_texts else "N/A"
                 bill_text = detected_text
+            elif class_id == 3:
+                detected_text = " ".join(detected_texts).strip() if detected_texts else "N/A"
+                units_text = detected_text
             else:
                 detected_text = "N/A"
 
-            # Get class color
-            color = (0, 255, 0) if class_id == 0 else (0, 0, 255)
+            # Get class color - explicitly handle all three classes
+            if class_id == 0:
+                color = (0, 255, 0)  # Green for bill
+            elif class_id == 2:
+                color = (0, 0, 255)  # Blue for ref_num
+            elif class_id == 3:
+                color = (255, 0, 0)  # Red for units
+            else:
+                color = (128, 128, 128)  # Gray for any other class
 
             # Draw bounding box
             cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
@@ -1104,15 +1155,15 @@ class PDFOCRApp(QMainWindow):
             cv2.putText(image, detected_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         # Draw summary text in the top-left corner
-        summary_text = f"Reference Number: {ref_num_text}\nTotal Bill: {bill_text} PKR"
-        cv2.rectangle(image, (10, 10), (500, 70), (0, 0, 0), -1)  # Black background
+        summary_text = f"Reference Number: {ref_num_text}\nTotal Bill: {bill_text} PKR\nUnits Used: {units_text}"
+        cv2.rectangle(image, (10, 10), (500, 100), (0, 0, 0), -1)  # Black background
         y_offset = 30
         for line in summary_text.split("\n"):
             cv2.putText(image, line, (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             y_offset += 30
 
         # Explicitly return all 4 values
-        return image, bill_text, ref_num_text, ref_num_valid
+        return image, bill_text, units_text, ref_num_text, ref_num_valid
 
     def show_error_message(self, message):
         # Simple error handling (you could use QMessageBox for a more robust solution)
